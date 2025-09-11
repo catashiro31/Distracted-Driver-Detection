@@ -104,7 +104,12 @@ st.sidebar.write(f"Thiết bị: **{device_kind.upper()}**")
 
 with st.sidebar.expander("ℹ️ Hướng dẫn nhanh"):
     st.markdown(
-        "- Ảnh hỗ trợ nhiều file; Video có tiến trình & tải về.\n"
+        """
+    - **B1. Chọn thiết bị:** Auto/GPU/CPU *(CPU có thể bật **Quantize**)*.
+    - **B2. Ảnh:** kéo-thả **nhiều ảnh** (JPG/PNG) → xem **Top-K** & **confidence** ngay.
+    - **B3. Video:** upload **MP4/MOV/AVI/MKV** (≤200MB), chọn **FPS sampling** → hệ thống **overlay** nhãn và **phát trực tiếp** trên web.
+    - **Tuỳ chỉnh:** **threshold**, **Top-K**, vị trí nhãn (Top/Bottom-Left/Right).
+    """
     )
 
 # ================== DOWNLOAD WEIGHTS (GitHub Releases) ==================
