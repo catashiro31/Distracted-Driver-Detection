@@ -104,8 +104,6 @@ st.sidebar.write(f"Thiết bị: **{device_kind.upper()}**")
 
 with st.sidebar.expander("ℹ️ Hướng dẫn nhanh"):
     st.markdown(
-        "- Đặt **WEIGHTS_URL** trong *Settings → Secrets* để tải model từ **GitHub Releases** (public/private).\n"
-        "- Nếu private: thêm **GITHUB_TOKEN** (PAT quyền read) và (tuỳ chọn) **WEIGHTS_SHA256**.\n"
         "- Ảnh hỗ trợ nhiều file; Video có tiến trình & tải về.\n"
     )
 
