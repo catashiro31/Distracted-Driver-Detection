@@ -404,7 +404,7 @@ with tab_img:
                 st.dataframe(df_top.style.format({"confidence":"{:.3f}"}), use_container_width=True, hide_index=True)
                 st.bar_chart(df_top.set_index("class"))
 
-# ---- VIDEO ---- (Phương án A: H.264/libx264 qua ffmpeg)
+# ---- VIDEO ----
 with tab_vid:
     st.subheader("Video")
     left, right = st.columns([1,1])
@@ -414,10 +414,7 @@ with tab_vid:
     with right:
         default_fps = 3 if DEVICE.type == "cuda" else 2
         fps_proc = st.slider("FPS suy luận (sampling)", 1, 30, default_fps)
-        show_live = st.checkbox("Xem trước trong khi xử lý (không re-encode)", value=True)
         autoplay = st.checkbox("Tự phát (autoplay, muted)", value=False)
-
-    live_placeholder = st.empty()
 
     if video:
         with st.status("Đang xử lý video…", expanded=False) as status:
@@ -471,7 +468,6 @@ with tab_vid:
                 infer_interval = 1.0 / max(1, fps_proc)
                 last_text = ""
 
-                t0 = time.time()
                 while True:
                     ret, frame = cap.read()
                     if not ret:
@@ -490,9 +486,8 @@ with tab_vid:
                         infered += 1
                         t_infer += dt
 
+                    # overlay và gửi frame vào ffmpeg encoder
                     frame = draw_label(frame, last_text, pos=overlay_pos)
-
-                    # gửi frame thẳng cho ffmpeg (BGR)
                     try:
                         proc.stdin.write(frame.tobytes())
                     except Exception as e:
@@ -500,12 +495,6 @@ with tab_vid:
                         break
 
                     frame_id += 1
-
-                    # Live preview ~5fps
-                    if show_live and frame_id % max(1, int(fps_out / 5)) == 0:
-                        live_placeholder.image(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB),
-                                               channels="RGB", use_container_width=True)
-
                     if total: pbar.progress(min(frame_id / total, 1.0))
 
                 cap.release()
