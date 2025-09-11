@@ -63,11 +63,13 @@
 ### 4.6. Trải nghiệm người dùng
 - Quy trình 3 bước: **mở web → upload → xem kết quả**.
 
-**Ảnh minh họa sản phẩm:**  
+**Ảnh minh họa sản phẩm:**
 ![Hình 1: Dự đoán với chế độ Ảnh](assets/picture1.png)
 *Hình 1: Dự đoán với chế độ Ảnh*
 ![Hình 2: Hiển thị trực quan dự đoán](assets/picture2.png)
 *Hình 2: Hiển thị trực quan dự đoán*
+![Hình 2: Dự đoán với chế độ Video](assets/picture3.png)
+*Hình 3: Dự đoán với chế độ Video*
 
 ## 5. Đánh giá & Kết quả
 
