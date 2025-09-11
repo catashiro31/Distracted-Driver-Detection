@@ -1,54 +1,14 @@
-import os, glob, hashlib, requests, streamlit as st
-
-def _sha256(path):
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for b in iter(lambda: f.read(1<<20), b""): h.update(b)
-    return h.hexdigest()
-
-def _download_url(url, dst, headers=None):
-    os.makedirs(os.path.dirname(dst), exist_ok=True)
-    with st.status("Đang tải trọng số…", expanded=False):
-        with requests.get(url, stream=True, timeout=300, headers=headers or {}) as r:
-            r.raise_for_status()
-            with open(dst, "wb") as f:
-                for chunk in r.iter_content(1<<20):
-                    if chunk: f.write(chunk)
-    return dst
-
-@st.cache_resource(show_spinner=True)
-def ensure_weights():
-    # 3) URL bất kỳ (GitHub Releases/S3/Drive link…)
-    URL = st.secrets.get("WEIGHTS_URL")
-    if URL:
-        dst = os.path.join("models", os.path.basename(URL))
-        headers = None
-        # (tuỳ chọn) nếu dùng GitHub Releases private:
-        if st.secrets.get("GITHUB_TOKEN"):
-            headers = {"Authorization": f"token {st.secrets['GITHUB_TOKEN']}"}
-        _download_url(URL, dst, headers=headers)
-
-        # Xác thực checksum (tuỳ chọn)
-        exp = st.secrets.get("WEIGHTS_SHA256")
-        if exp and _sha256(dst) != exp:
-            os.remove(dst)
-            raise ValueError("SHA256 không khớp.")
-        return dst
-
-    # Không tìm thấy gì
-    return None
-
 # app.py
-import streamlit as st
-from PIL import Image
+import os, glob, hashlib, requests, re, time, tempfile, io, json
 import numpy as np
 import pandas as pd
-import json, os, io, time, tempfile
+from PIL import Image
 import cv2
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import timm
+import streamlit as st
 
 # ================= Page Config & THEME =================
 st.set_page_config(page_title="Realtime Classifier", page_icon="🎞️", layout="wide")
@@ -74,7 +34,6 @@ CUSTOM_CSS = f"""
     --card-bd: rgba(255,255,255,0.08);
   }}
 }}
-/* Hero */
 .hero {{
   padding: 20px 24px; border-radius: 16px;
   background: linear-gradient(135deg, var(--acc) 0%, #1e293b 60%);
@@ -82,11 +41,11 @@ CUSTOM_CSS = f"""
 }}
 .hero h1 {{ margin: 0; font-weight: 800; letter-spacing: .4px; }}
 .hero p  {{ margin: 6px 0 0; opacity: .9; }}
-/* Badges */
+
 .badge {{ display:inline-block; padding:4px 10px; border-radius:999px; font-size:12px; font-weight:600; }}
 .badge-acc {{ background: rgba(255,255,255,.18); color:#fff; border:1px solid rgba(255,255,255,.25); }}
 .badge-grey{{ background:#F1F3F4; color:#3C4043; }}
-/* Cards */
+
 .card {{
   background: var(--card-bg);
   border: 1px solid var(--card-bd);
@@ -100,11 +59,10 @@ CUSTOM_CSS = f"""
 }}
 .info-kv .key {{ color:#64748b; }}
 .info-kv .val {{ overflow-wrap: anywhere; word-break: break-word; white-space: normal; }}
+
 hr {{ margin: .6rem 0 1rem; }}
 .footer {{ color:#6b7280; font-size:12px; margin-top:24px; text-align:center; }}
-/* Buttons tweak */
 .stButton>button {{ border-radius: 12px; }}
-/* Uploader hint */
 .small-hint {{ color:#64748b; font-size:12px; margin-top:-6px; }}
 </style>
 """
@@ -113,29 +71,12 @@ st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
 # ================= Sidebar =================
 st.sidebar.header("⚙️ Cấu hình")
 
-# quick actions
 cc1, cc2 = st.sidebar.columns(2)
 if cc1.button("🧹 Clear cache"):
     st.cache_resource.clear()
     st.toast("Đã xoá cache. App sẽ tải lại model khi cần.", icon="✅")
 if cc2.button("🔁 Rerun"):
     st.experimental_rerun()
-
-# ---- dùng cố định swinB384_f1.pth ----
-def resolve_ckpt():
-    candidates = [
-        "swinB384_f1.pth",
-        os.path.join("models", "swinB384_f1.pth"),
-        os.path.join(os.getcwd(), "swinB384_f1.pth"),
-    ]
-    for p in candidates:
-        if os.path.exists(p):
-            return p
-    return "swinB384_f1.pth"  # vẫn trả về tên mong muốn để báo lỗi đẹp ở phần load
-
-ckpt_path = resolve_ckpt()
-st.sidebar.markdown("**Checkpoint (.pth)**")
-st.sidebar.code(ckpt_path, language="text")
 
 dev_choice = st.sidebar.selectbox("Thiết bị chạy", ["Auto (CUDA nếu có)", "GPU (CUDA)", "CPU"], index=0)
 cuda_available = torch.cuda.is_available()
@@ -148,13 +89,13 @@ elif dev_choice == "CPU":
 else:
     device_kind = "cuda" if cuda_available else "cpu"
 
-row1a, row1b = st.sidebar.columns(2)
-with row1a:
+col_q, col_c = st.sidebar.columns(2)
+with col_q:
     use_cpu_quant = st.checkbox("Quantize CPU", value=(device_kind=="cpu"),
                                 help="Dynamic quantization (Linear→int8) để tăng tốc trên CPU.")
-with row1b:
+with col_c:
     use_compile = st.checkbox("torch.compile", value=False,
-                              help="Nên tắt nếu chưa cài MSVC/Triton đầy đủ.")
+                              help="Chỉ bật khi môi trường hỗ trợ (Windows cần MSVC; Cloud không có GPU).")
 
 conf_threshold = st.sidebar.slider("Ngưỡng 'không chắc' (confidence)", 0.0, 0.99, 0.20, 0.01)
 topk = st.sidebar.slider("Top-K hiển thị", 1, 10, 5)
@@ -163,9 +104,83 @@ st.sidebar.write(f"Thiết bị: **{device_kind.upper()}**")
 
 with st.sidebar.expander("ℹ️ Hướng dẫn nhanh"):
     st.markdown(
-        "- Chọn **CPU** và bật *Quantize* nếu không có GPU.\n"
-        "- **Ảnh** hỗ trợ upload nhiều file; **Video** có thanh tiến trình & tải về.\n"
+        "- Đặt **WEIGHTS_URL** trong *Settings → Secrets* để tải model từ **GitHub Releases** (public/private).\n"
+        "- Nếu private: thêm **GITHUB_TOKEN** (PAT quyền read) và (tuỳ chọn) **WEIGHTS_SHA256**.\n"
+        "- Ảnh hỗ trợ nhiều file; Video có tiến trình & tải về.\n"
     )
+
+# ================== DOWNLOAD WEIGHTS (GitHub Releases) ==================
+def _sha256(path: str) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for b in iter(lambda: f.read(1<<20), b""):
+            h.update(b)
+    return h.hexdigest()
+
+def _download_url(url: str, dst: str, headers: dict | None = None):
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    base_headers = {"Accept": "application/octet-stream"}
+    if headers:
+        base_headers.update(headers)
+    # TUYỆT ĐỐI: KHÔNG dùng st.status/st.progress trong hàm cache
+    with requests.get(url, stream=True, timeout=300, headers=base_headers) as r:
+        r.raise_for_status()
+        with open(dst, "wb") as f:
+            for chunk in r.iter_content(1<<20):
+                if chunk:
+                    f.write(chunk)
+    return dst
+
+@st.cache_resource(show_spinner=False)
+def ensure_weights() -> str | None:
+    """
+    Ưu tiên:
+      1) file .pth sẵn có trong ./models hoặc root
+      2) WEIGHTS_URL trong secrets (GitHub Releases public/private)
+         - nếu private: cần GITHUB_TOKEN (PAT)
+      3) không có -> None
+    (KHÔNG gọi widget ở đây để tránh CachedWidgetWarning)
+    """
+    # 1) local
+    found = glob.glob("models/*.pth") + glob.glob("*.pth")
+    if found:
+        return found[0]
+
+    # 2) từ URL
+    URL = st.secrets.get("WEIGHTS_URL")
+    if URL:
+        dst = os.path.join("models", os.path.basename(URL))
+        token = st.secrets.get("GITHUB_TOKEN")
+        headers = {"Authorization": f"token {token}"} if token else None
+        _download_url(URL, dst, headers=headers)
+
+        exp = st.secrets.get("WEIGHTS_SHA256")
+        if exp:
+            got = _sha256(dst)
+            if got.lower() != exp.lower():
+                try: os.remove(dst)
+                except: pass
+                raise ValueError(f"SHA256 không khớp. expected={exp} got={got}")
+        return dst
+
+    return None
+
+# Gọi tải trọng số (có spinner ở ngoài để UX tốt, nhưng không ở trong cache)
+with st.spinner("Đang chuẩn bị trọng số…"):
+    ckpt_path = ensure_weights()
+
+if not ckpt_path or not os.path.exists(ckpt_path):
+    st.error(
+        "❌ Chưa có trọng số.\n\n"
+        "Vào **⋯ → Settings → Secrets** và thêm, ví dụ (public):\n"
+        "```\nWEIGHTS_URL = \"https://github.com/<user>/<repo>/releases/download/v1.0.0/best_swinB384.pth\"\n"
+        "WEIGHTS_SHA256 = \"<checksum-tuỳ-chọn>\"\n```\n"
+        "Nếu private, thêm `GITHUB_TOKEN` (PAT)."
+    )
+    st.stop()
+
+st.sidebar.markdown("**Checkpoint (.pth) (auto)**")
+st.sidebar.code(ckpt_path, language="text")
 
 # ================= Labels (fallback) =================
 LABELS = []
@@ -194,6 +209,19 @@ def _optimize_cpu_runtime():
     except Exception:
         pass
 
+def pretty_arch(arch: str) -> str:
+    # Rút gọn tên kiến trúc (ví dụ Swin/ViT) + chèn zero-width space để wrap mềm
+    m = re.match(r"swin_(tiny|small|base|large)_patch(\d+)_window(\d+)_?(\d+)?", arch or "")
+    if m:
+        scale, patch, win, size = m.groups()
+        S = {"tiny":"T","small":"S","base":"B","large":"L"}[scale]
+        tail = f" • {size}" if size else ""
+        s = f"Swin-{S} • p{patch} • win{win}{tail}"
+    else:
+        s = (arch or "").replace("_", " ")
+
+    return s.replace("•", "•\u200b").replace("-", "-\u200b").replace("/", "/\u200b")
+
 @st.cache_resource(show_spinner=True)
 def load_torch_model(ckpt_path: str, device_kind: str, use_cpu_quant: bool, use_compile: bool, labels: list):
     if not os.path.exists(ckpt_path):
@@ -207,7 +235,8 @@ def load_torch_model(ckpt_path: str, device_kind: str, use_cpu_quant: bool, use_
     state_dict = ckpt["model"] if isinstance(ckpt, dict) and "model" in ckpt else ckpt
 
     args = ckpt.get("args", {}) if isinstance(ckpt, dict) else {}
-    arch = args.get("model", "swinB384_f1")
+    # ⚠️ tên timm hợp lệ (đừng dùng 'swinB384_f1')
+    arch = args.get("model", "swin_base_patch4_window12_384")
     img_size = int(args.get("img_size", 384))
 
     classes_from_ckpt = ckpt.get("classes") if isinstance(ckpt, dict) else None
@@ -250,13 +279,11 @@ try:
 except Exception as e:
     st.error(f"❌ Lỗi khi load model: {e}")
     st.stop()
+
 model = pack["model"]
 CLASS_NAMES = pack["class_names"] if pack["class_names"] else [f"class_{i}" for i in range(pack["num_classes"])]
-IMG_SIZE = pack["img_size"]; DEVICE = pack["device"]
-
-def pretty_arch(arch: str) -> str:
-    # chèn zero-width space để xuống dòng sau '_' nếu cần
-    return arch.replace("_", "_\u200b")
+IMG_SIZE = pack["img_size"]
+DEVICE = pack["device"]
 
 # ================= Hero =================
 st.markdown(
@@ -311,6 +338,9 @@ with c5:
 st.markdown("---")
 
 # ================= Preprocess & Inference =================
+MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+STD  = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+
 def preprocess_pil(pil_img, size=IMG_SIZE):
     arr = np.asarray(pil_img.resize((size, size))).astype(np.float32) / 255.0
     arr = (arr - MEAN) / STD
@@ -463,4 +493,4 @@ with tab_vid:
                 )
 
 # ================= Footer =================
-st.markdown("<div class='footer'>Made with ❤️ SMC_4 • </div>", unsafe_allow_html=True)
+st.markdown("<div class='footer'>Made with ❤️ SMC_4</div>", unsafe_allow_html=True)
