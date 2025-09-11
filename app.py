@@ -1,5 +1,5 @@
 # app.py
-import os, glob, hashlib, requests, re, time, tempfile, io, json
+import os, glob, hashlib, requests, re, time, tempfile, io, json, subprocess, base64
 import numpy as np
 import pandas as pd
 from PIL import Image
@@ -9,6 +9,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import timm
 import streamlit as st
+from imageio_ffmpeg import get_ffmpeg_exe  # ⬅️ dùng ffmpeg H.264 để trình duyệt phát được
 
 # ================= Page Config & THEME =================
 st.set_page_config(page_title="Realtime Classifier", page_icon="🎞️", layout="wide")
@@ -105,11 +106,11 @@ st.sidebar.write(f"Thiết bị: **{device_kind.upper()}**")
 with st.sidebar.expander("ℹ️ Hướng dẫn nhanh"):
     st.markdown(
         """
-    - **B1. Chọn thiết bị:** Auto/GPU/CPU *(CPU có thể bật **Quantize**)*.
-    - **B2. Ảnh:** kéo-thả **nhiều ảnh** (JPG/PNG) → xem **Top-K** & **confidence** ngay.
-    - **B3. Video:** upload **MP4/MOV/AVI/MKV** (≤200MB), chọn **FPS sampling** → hệ thống **overlay** nhãn và **phát trực tiếp** trên web.
-    - **Tuỳ chỉnh:** **threshold**, **Top-K**, vị trí nhãn (Top/Bottom-Left/Right).
-    """
+- **B1. Chọn thiết bị:** Auto/GPU/CPU *(CPU có thể bật **Quantize**)*.
+- **B2. Ảnh:** kéo-thả **nhiều ảnh** (JPG/PNG) → xem **Top-K** & **confidence** ngay.
+- **B3. Video:** upload **MP4/MOV/AVI/MKV** (≤200MB), chọn **FPS sampling** → hệ thống **overlay** nhãn và **phát trực tiếp** trên web.
+- **Tuỳ chỉnh:** **threshold**, **Top-K**, vị trí nhãn (Top/Bottom-Left/Right).
+"""
     )
 
 # ================== DOWNLOAD WEIGHTS (GitHub Releases) ==================
@@ -125,7 +126,6 @@ def _download_url(url: str, dst: str, headers: dict | None = None):
     base_headers = {"Accept": "application/octet-stream"}
     if headers:
         base_headers.update(headers)
-    # TUYỆT ĐỐI: KHÔNG dùng st.status/st.progress trong hàm cache
     with requests.get(url, stream=True, timeout=300, headers=base_headers) as r:
         r.raise_for_status()
         with open(dst, "wb") as f:
@@ -136,19 +136,10 @@ def _download_url(url: str, dst: str, headers: dict | None = None):
 
 @st.cache_resource(show_spinner=False)
 def ensure_weights() -> str | None:
-    """
-    Ưu tiên:
-      1) file .pth sẵn có trong ./models hoặc root
-      2) WEIGHTS_URL trong secrets (GitHub Releases public/private)
-         - nếu private: cần GITHUB_TOKEN (PAT)
-      3) không có -> None
-    (KHÔNG gọi widget ở đây để tránh CachedWidgetWarning)
-    """
     # 1) local
     found = glob.glob("models/*.pth") + glob.glob("*.pth")
     if found:
         return found[0]
-
     # 2) từ URL
     URL = st.secrets.get("WEIGHTS_URL")
     if URL:
@@ -156,7 +147,6 @@ def ensure_weights() -> str | None:
         token = st.secrets.get("GITHUB_TOKEN")
         headers = {"Authorization": f"token {token}"} if token else None
         _download_url(URL, dst, headers=headers)
-
         exp = st.secrets.get("WEIGHTS_SHA256")
         if exp:
             got = _sha256(dst)
@@ -165,10 +155,8 @@ def ensure_weights() -> str | None:
                 except: pass
                 raise ValueError(f"SHA256 không khớp. expected={exp} got={got}")
         return dst
-
     return None
 
-# Gọi tải trọng số (có spinner ở ngoài để UX tốt, nhưng không ở trong cache)
 with st.spinner("Đang chuẩn bị trọng số…"):
     ckpt_path = ensure_weights()
 
@@ -213,7 +201,6 @@ def _optimize_cpu_runtime():
         pass
 
 def pretty_arch(arch: str) -> str:
-    # Rút gọn tên kiến trúc (ví dụ Swin/ViT) + chèn zero-width space để wrap mềm
     m = re.match(r"swin_(tiny|small|base|large)_patch(\d+)_window(\d+)_?(\d+)?", arch or "")
     if m:
         scale, patch, win, size = m.groups()
@@ -222,7 +209,6 @@ def pretty_arch(arch: str) -> str:
         s = f"Swin-{S} • p{patch} • win{win}{tail}"
     else:
         s = (arch or "").replace("_", " ")
-
     return s.replace("•", "•\u200b").replace("-", "-\u200b").replace("/", "/\u200b")
 
 @st.cache_resource(show_spinner=True)
@@ -238,7 +224,6 @@ def load_torch_model(ckpt_path: str, device_kind: str, use_cpu_quant: bool, use_
     state_dict = ckpt["model"] if isinstance(ckpt, dict) and "model" in ckpt else ckpt
 
     args = ckpt.get("args", {}) if isinstance(ckpt, dict) else {}
-    # ⚠️ tên timm hợp lệ (đừng dùng 'swinB384_f1')
     arch = args.get("model", "swin_base_patch4_window12_384")
     img_size = int(args.get("img_size", 384))
 
@@ -419,9 +404,7 @@ with tab_img:
                 st.dataframe(df_top.style.format({"confidence":"{:.3f}"}), use_container_width=True, hide_index=True)
                 st.bar_chart(df_top.set_index("class"))
 
-# ---- VIDEO ----
-import base64  # ⬅️ thêm ở đầu file cũng được; để ở đây vẫn chạy
-
+# ---- VIDEO ---- (Phương án A: H.264/libx264 qua ffmpeg)
 with tab_vid:
     st.subheader("Video")
     left, right = st.columns([1,1])
@@ -434,13 +417,12 @@ with tab_vid:
         show_live = st.checkbox("Xem trước trong khi xử lý (không re-encode)", value=True)
         autoplay = st.checkbox("Tự phát (autoplay, muted)", value=False)
 
-    # placeholder cho live preview (không cần file)
     live_placeholder = st.empty()
 
     if video:
         with st.status("Đang xử lý video…", expanded=False) as status:
             tdir = tempfile.mkdtemp()
-            in_path = os.path.join(tdir, "in.mp4")
+            in_path  = os.path.join(tdir, "in.mp4")
             out_path = os.path.join(tdir, "out.mp4")
             with open(in_path, "wb") as f:
                 f.write(video.read())
@@ -453,9 +435,36 @@ with tab_vid:
                 height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
                 vfps   = cap.get(cv2.CAP_PROP_FPS)
                 total  = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) if cap.get(cv2.CAP_PROP_FRAME_COUNT) > 0 else None
+                fps_out = vfps if vfps and vfps > 0 else 25
 
-                fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-                writer = cv2.VideoWriter(out_path, fourcc, vfps if vfps>0 else 25, (width, height))
+                # === ffmpeg H.264 (avc1) + yuv420p + faststart ===
+                try:
+                    ffmpeg = get_ffmpeg_exe()
+                except Exception as e:
+                    st.error(f"Không tìm thấy ffmpeg: {e}\nHãy thêm `imageio-ffmpeg` vào requirements.")
+                    st.stop()
+
+                cmd = [
+                    ffmpeg, "-y",
+                    "-f", "rawvideo",
+                    "-vcodec", "rawvideo",
+                    "-pix_fmt", "bgr24",
+                    "-s", f"{width}x{height}",
+                    "-r", str(fps_out),
+                    "-i", "-",
+                    "-an",
+                    "-vcodec", "libx264",
+                    "-pix_fmt", "yuv420p",
+                    "-preset", "veryfast",
+                    "-movflags", "+faststart",
+                    out_path,
+                ]
+
+                try:
+                    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
+                except Exception as e:
+                    st.error(f"Không khởi chạy được ffmpeg/libx264: {e}")
+                    st.stop()
 
                 pbar = st.progress(0)
                 frame_id, infered, t_infer, last_infer_ts = 0, 0, 0.0, -1.0
@@ -467,7 +476,7 @@ with tab_vid:
                     ret, frame = cap.read()
                     if not ret:
                         break
-                    t = frame_id / (vfps if vfps>0 else 25)
+                    t = frame_id / fps_out
 
                     if last_infer_ts < 0 or (t - last_infer_ts) >= infer_interval:
                         pil = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
@@ -482,30 +491,49 @@ with tab_vid:
                         t_infer += dt
 
                     frame = draw_label(frame, last_text, pos=overlay_pos)
-                    writer.write(frame)
+
+                    # gửi frame thẳng cho ffmpeg (BGR)
+                    try:
+                        proc.stdin.write(frame.tobytes())
+                    except Exception as e:
+                        st.error(f"ffmpeg ghi lỗi: {e}")
+                        break
+
                     frame_id += 1
 
-                    # 🔵 Live preview: hiển thị khung hình ngay khi đang xử lý
-                    if show_live and frame_id % max(1, int((vfps if vfps>0 else 25) / 5)) == 0:
+                    # Live preview ~5fps
+                    if show_live and frame_id % max(1, int(fps_out / 5)) == 0:
                         live_placeholder.image(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB),
                                                channels="RGB", use_container_width=True)
 
-                    if total: pbar.progress(min(frame_id/total, 1.0))
+                    if total: pbar.progress(min(frame_id / total, 1.0))
 
-                cap.release(); writer.release()
+                cap.release()
+                try:
+                    proc.stdin.close()
+                except Exception:
+                    pass
+                ret = proc.wait()
+                if ret != 0:
+                    st.error("ffmpeg trả về mã lỗi (có thể thiếu libx264).")
+                    st.stop()
+
                 status.update(label="Hoàn tất ✅", state="complete")
-                st.toast("Xong! Video đã được gắn nhãn.", icon="🎉")
+                st.toast("Xong! Video đã được gắn nhãn (H.264).", icon="🎉")
 
-                # 🟢 Phát video NGAY TRÊN WEB (không cần tải)
-                with open(out_path, "rb") as f:
-                    video_bytes = f.read()
+                # Phát trực tiếp trên web
+                try:
+                    with open(out_path, "rb") as f:
+                        video_bytes = f.read()
+                except Exception as e:
+                    st.error(f"Không đọc được video output: {e}")
+                    st.stop()
 
                 if autoplay:
-                    # HTML5 video tag để autoplay (muted/loop để trình duyệt cho auto play)
                     b64 = base64.b64encode(video_bytes).decode("utf-8")
                     st.markdown(
                         f"""
-                        <video controls autoplay muted playsinline loop style="width:100%; border-radius:12px;">
+                        <video controls autoplay muted playsinline style="width:100%; border-radius:12px;">
                           <source src="data:video/mp4;base64,{b64}" type="video/mp4">
                           Trình duyệt không hỗ trợ phát video.
                         </video>
@@ -513,10 +541,9 @@ with tab_vid:
                         unsafe_allow_html=True
                     )
                 else:
-                    # Trình phát của Streamlit (không tự play -> người dùng bấm Play)
                     st.video(video_bytes, format="video/mp4")
 
-                # (Tuỳ chọn) vẫn cung cấp nút tải, nhưng KHÔNG bắt buộc
+                # Nút tải (tuỳ chọn)
                 with open(out_path, "rb") as f:
                     st.download_button("⬇️ Tải video đã gắn nhãn", f, file_name="result.mp4", mime="video/mp4")
 
