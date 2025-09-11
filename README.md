@@ -4,7 +4,7 @@
 - **Tên đội:** SMC_4  
 - **Thành viên:**  
   - Đỗ Văn Tiến – CNTT4 – K65  
-  - Nguyễn Duy Phước – DTVT1 – K64  
+  - Nguyễn Duy Phước – DTVT1 – K63  
 - **Đề tài:** Phát hiện hành vi lái xe mất tập trung qua ảnh & video  
 - **Sự kiện:** Summer Code Camp
 
