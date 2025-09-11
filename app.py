@@ -415,6 +415,8 @@ with tab_img:
                 st.bar_chart(df_top.set_index("class"))
 
 # ---- VIDEO ----
+import base64  # ⬅️ thêm ở đầu file cũng được; để ở đây vẫn chạy
+
 with tab_vid:
     st.subheader("Video")
     left, right = st.columns([1,1])
@@ -424,6 +426,11 @@ with tab_vid:
     with right:
         default_fps = 3 if DEVICE.type == "cuda" else 2
         fps_proc = st.slider("FPS suy luận (sampling)", 1, 30, default_fps)
+        show_live = st.checkbox("Xem trước trong khi xử lý (không re-encode)", value=True)
+        autoplay = st.checkbox("Tự phát (autoplay, muted)", value=False)
+
+    # placeholder cho live preview (không cần file)
+    live_placeholder = st.empty()
 
     if video:
         with st.status("Đang xử lý video…", expanded=False) as status:
@@ -450,6 +457,7 @@ with tab_vid:
                 infer_interval = 1.0 / max(1, fps_proc)
                 last_text = ""
 
+                t0 = time.time()
                 while True:
                     ret, frame = cap.read()
                     if not ret:
@@ -469,14 +477,41 @@ with tab_vid:
                         t_infer += dt
 
                     frame = draw_label(frame, last_text, pos=overlay_pos)
-                    writer.write(frame); frame_id += 1
+                    writer.write(frame)
+                    frame_id += 1
+
+                    # 🔵 Live preview: hiển thị khung hình ngay khi đang xử lý
+                    if show_live and frame_id % max(1, int((vfps if vfps>0 else 25) / 5)) == 0:
+                        live_placeholder.image(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB),
+                                               channels="RGB", use_container_width=True)
+
                     if total: pbar.progress(min(frame_id/total, 1.0))
 
                 cap.release(); writer.release()
                 status.update(label="Hoàn tất ✅", state="complete")
                 st.toast("Xong! Video đã được gắn nhãn.", icon="🎉")
 
-                st.video(out_path)
+                # 🟢 Phát video NGAY TRÊN WEB (không cần tải)
+                with open(out_path, "rb") as f:
+                    video_bytes = f.read()
+
+                if autoplay:
+                    # HTML5 video tag để autoplay (muted/loop để trình duyệt cho auto play)
+                    b64 = base64.b64encode(video_bytes).decode("utf-8")
+                    st.markdown(
+                        f"""
+                        <video controls autoplay muted playsinline loop style="width:100%; border-radius:12px;">
+                          <source src="data:video/mp4;base64,{b64}" type="video/mp4">
+                          Trình duyệt không hỗ trợ phát video.
+                        </video>
+                        """,
+                        unsafe_allow_html=True
+                    )
+                else:
+                    # Trình phát của Streamlit (không tự play -> người dùng bấm Play)
+                    st.video(video_bytes, format="video/mp4")
+
+                # (Tuỳ chọn) vẫn cung cấp nút tải, nhưng KHÔNG bắt buộc
                 with open(out_path, "rb") as f:
                     st.download_button("⬇️ Tải video đã gắn nhãn", f, file_name="result.mp4", mime="video/mp4")
 
