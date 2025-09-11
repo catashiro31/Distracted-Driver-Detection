@@ -1,0 +1,14 @@
+{
+  "class_names": [
+    "safe_driving",
+    "texting_right",
+    "talking_phone_right",
+    "texting_left",
+    "talking_phone_left",
+    "operating_radio",
+    "drinking",
+    "reaching_behind",
+    "hair_and_makeup",
+    "talking_to_passenger"
+  ]
+}
